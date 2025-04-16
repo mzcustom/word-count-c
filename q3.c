@@ -1,13 +1,15 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdint.h>
 #include <assert.h>
 #include <sys/stat.h>
 #include <string.h>
+#include <x86intrin.h>
+#include <immintrin.h>
 
 typedef int64_t i64;
 typedef int32_t i32; 
+typedef uint64_t u64; 
 typedef uint32_t u32; 
 typedef uint16_t u16; 
 typedef int32_t bool;
@@ -93,6 +95,30 @@ static string read_entire_file(char *path) {
     return string_buffer;
 }
 
+// Cycle counter
+enum {
+    TABLE_CREATE_ROUTINE,
+    PICK_N_ROUTINE,
+    ROUTINE_LEN
+};
+typedef struct {
+    u64 hit; // how many times routine gets called. Convenient when gets caled in a loop. 
+    u64 cycle_count;
+} timed_routine;
+
+// global array for the routines being counted.
+timed_routine routines[ROUTINE_LEN];
+#define START_CYCLE_TIMER(RID) u64 start_count_RID = __rdtsc();
+#define STOP_CYCLE_TIMER(RID) routines[RID].cycle_count += __rdtsc() - start_count_RID; routines[RID].hit++;
+
+static void print_cycle_counts() {
+    for (u32 i = 0; i < ROUTINE_LEN; ++i) {
+        timed_routine rt = routines[i];
+        printf("Routine %d: cycle_count: %llu, hit: %llu, %llu cycle/routine\n", i, rt.cycle_count, rt.hit, 
+                rt.cycle_count/rt.hit);
+    }
+}
+
 typedef struct {
     string word; // key in hashtable
     u32 frequency; // value in hashtable
@@ -168,7 +194,7 @@ static word_node *get_new_word_node(node_pool *pool) {
 // because once merged, node chains in certain slots could get long,
 #define DJB2_INIT_HASH 5381
 //#define DJB2_HASH_MULT 32
-#define BUCKET_SIZE 2 << 12
+#define BUCKET_SIZE (2 << 12)
 typedef struct {
     size_t count;
     word_node *bucket[BUCKET_SIZE];
@@ -249,21 +275,13 @@ static void print_n_most_frequent_word(node_pool *pool, size_t n) {
     }
 }
 
-// Word counting rules. Randomly chosen.
-// Contraction("We'll", "know't", etc) and counted as 1 word
-// Dash-connected word counted as separate words
-// Case insensitive
-// Arabic number not counted(only occurs once "3")
-// Roman number counted as a word ("VI")"
-static size_t create_table(string buffer, size_t file_begin, size_t file_end, node_pool *pool, node_table *table) {
-    while (buffer.data[file_begin] == 39) { file_begin++; } // to avoid the case where file with with "'"
-    
+static size_t create_table_scalar(string buffer, size_t file_begin, size_t file_end, node_pool *pool, node_table *table) {
     size_t start = file_begin;
     size_t end = start;
     size_t word_node_count = 0;
-    u32 hash_mask = (BUCKET_SIZE) - 1; // To mask out the top bits from hash without using mod
-
-    while (start <= file_end - 1) { // skip "'" at the very bigging of the word.
+    u32 hash_mask = BUCKET_SIZE - 1; // To mask out the top bits from hash without using mod
+    
+    while (start <= file_end - 1) { // skip "'" at the very beginning of the word.
         while(start <= file_end - 1 && ((buffer.data[start] == 39) || !(IS_WORD_CHAR(buffer.data[start])))) { 
             start++;
         }    
@@ -279,7 +297,7 @@ static size_t create_table(string buffer, size_t file_begin, size_t file_end, no
             // for Case insensitive counting, subtract the lower case ascii value to the upper case
             // save the upper case converted char to the buffer, as well, for the simpler word comparison.
             i32 char_value = IS_LOWER(buffer.data[end]) ? buffer.data[end] -= 32 : buffer.data[end];
-            hash = ((hash << 5) + hash) + char_value; // same as multiplying by DHB2_HASH_MULT + val
+            hash = ((hash << 5) + hash) + char_value; // same as multiplying 33(2^5+1) by DHB2_HASH_MULT + val
             end++;
         }
         slot = hash & hash_mask; // getting rid of top bits in lieu of doing mod
@@ -315,6 +333,35 @@ static size_t create_table(string buffer, size_t file_begin, size_t file_end, no
             start = end + 1;
         }
     }
+    return word_node_count;
+}
+// Word counting rules. Randomly chosen.
+// Contraction("We'll", "know't", etc) and counted as 1 word
+// Dash-connected word counted as separate words
+// Case insensitive
+// Arabic number not counted(only occurs once "3")
+// Roman number counted as a word ("VI")"
+static size_t create_table(string buffer, size_t file_begin, size_t file_end, node_pool *pool, node_table *table) {
+    while (buffer.data[file_begin] == 39) { file_begin++; } // to avoid the case where file with with "'"
+    
+    //size_t start = file_begin;
+    //size_t end = start;
+    //size_t word_node_count = 0;
+    //u32 hash_mask = (BUCKET_SIZE) - 1; // To mask out the top bits from hash without using mod
+
+#ifdef DEBUG
+    START_CYCLE_TIMER(TABLE_CREATE_ROUTINE)
+#endif
+    
+#ifndef PARSE_SIMD
+    size_t word_node_count = create_table_scalar(buffer, file_begin, file_end, pool, table); 
+#else
+    // TODO: add create_table_simd function here
+#endif
+
+#ifdef DEBUG
+    STOP_CYCLE_TIMER(TABLE_CREATE_ROUTINE)
+#endif
 
     assert(word_node_count == table->count);
 
@@ -350,13 +397,17 @@ int main(int agrc, char *argv[]) {
     size_t word_node_count = create_table(file_string, 0, file_string.length, pool, table);
     sort_pool(pool);
     print_n_most_frequent_word(pool, n);
-    
+
+#ifdef DEBUG
+    print_cycle_counts();
+#endif
+
     //printf("Node pool alloc num: %llu\n", node_pool_alloc_num); // for debug
     
     // Free memory. Usually, this isn't necessary because OS "free" the memory and make it available
     // for other processes when this process gets termintated, anyway. This is just for the sake of 
-    // old-skool "idiometic" C programming doing RAII sort of stuff manually.
-    // When allocating pages with mmap or VirtualAlloc(windows), memory alloc and free gets simpler. <= next time!
+    // "idiometic" C programming still taught in the CS class at the university.
+    // When allocating pages with mmap or VirtualAlloc(windows), memory alloc and free gets simpler.
     node_pool_free(pool);
     node_table_free(table);
     string_free(&file_string);
