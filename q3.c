@@ -72,6 +72,7 @@ static string read_entire_file(char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) {
         fprintf(stderr, "ERROR: Unable to open file %s\n", path);
+        exit(1);
     } else {
 #if _WIN32
         struct __stat64 stat;
@@ -86,6 +87,7 @@ static string read_entire_file(char *path) {
             if (fread(string_buffer.data, string_buffer.length, 1, f) != 1) {
                 fprintf(stderr, "ERROR: Unable to read file %s\n", path);
                 string_free(&string_buffer);
+                exit(1);
             }
         }
 
@@ -102,7 +104,7 @@ enum {
     ROUTINE_LEN
 };
 typedef struct {
-    u64 hit; // how many times routine gets called. Convenient when gets caled in a loop. 
+    u64 hit; // how many times routine gets called. Convenient when gets called in a loop. 
     u64 cycle_count;
 } timed_routine;
 
@@ -128,7 +130,7 @@ typedef struct {
     struct word_node *next_node; // for chaining in the hashtable when colliding
 } word_node;
 
-#define NODE_POOL_SIZE 2 << 13 
+#define NODE_POOL_SIZE (2 << 13) 
 typedef struct {
     size_t count;
     word_node data[NODE_POOL_SIZE];
@@ -300,10 +302,10 @@ static size_t create_table_scalar(string buffer, size_t file_begin, size_t file_
             hash = ((hash << 5) + hash) + char_value; // same as multiplying 33(2^5+1) by DHB2_HASH_MULT + val
             end++;
         }
-        slot = hash & hash_mask; // getting rid of top bits in lieu of doing mod
+        slot = hash & hash_mask; // getting rid of top bits. Same as mod BUCKET_SIZE 
 
         if (start < end) {
-            string word = (string){ end - start, buffer.data + start };
+            string word = (string){ end-start, buffer.data+start };
             word_node *existing_node = find_node_from_table(table, slot, word);
             if (existing_node) {
                 existing_node->frequency++;
@@ -369,9 +371,11 @@ static size_t create_table(string buffer, size_t file_begin, size_t file_end, no
 }
 
 int main(int agrc, char *argv[]) {
-    fprintf(stdout, "\nUsage: q3 {N}, to find N most frequent words.\n ");
-    fprintf(stdout, "      q3_simd {N}, same as above but runs faster.\n ");
-    int n = atoi(argv[1]);
+    if (agrc == 1) {
+        fprintf(stdout, "\nUsage: q3 {N}, to find N most frequent words.\n ");
+        fprintf(stdout, "      q3_simd {N}, same as above but runs faster.\n ");
+    }
+    int nth = atoi(argv[1]);
     
     string file_string = read_entire_file(FILE_PATH);
     if (file_string.length == 0) {
@@ -396,7 +400,7 @@ int main(int agrc, char *argv[]) {
 
     size_t word_node_count = create_table(file_string, 0, file_string.length, pool, table);
     sort_pool(pool);
-    print_n_most_frequent_word(pool, n);
+    print_n_most_frequent_word(pool, nth);
 
 #ifdef DEBUG
     print_cycle_counts();
@@ -411,4 +415,6 @@ int main(int agrc, char *argv[]) {
     node_pool_free(pool);
     node_table_free(table);
     string_free(&file_string);
+
+    return 0;
 }
